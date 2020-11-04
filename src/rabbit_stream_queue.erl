@@ -233,8 +233,32 @@ cancel(_Q, ConsumerTag, OkMsg, ActingUser, #stream_client{readers = Readers0,
     maybe_send_reply(self(), OkMsg),
     {ok, State#stream_client{readers = Readers}}.
 
-credit(_, _, _, _) ->
-    ok.
+credit(CTag, Credit, Drain, #stream_client{readers = Readers0,
+                                           name = Name,
+                                           leader = Leader} = State) ->
+    {Readers1, Msgs} = case Readers0 of
+                          #{CTag := #stream{credit = Credit0} = Str0} ->
+                              Str1 = Str0#stream{credit = Credit0 + Credit},
+                              {Str, Msgs0} = stream_entries(Name, Leader, Str1),
+                              {Readers0#{CTag => Str}, Msgs0};
+                          _ ->
+                              {Readers0, []}
+                      end,
+    rabbit_channel:send_credit_reply(self(), length(Msgs)),
+    rabbit_channel:deliver(self(), CTag, true, Msgs),
+    Readers = case Drain of
+                  true ->
+                      case Readers1 of
+                          #{CTag := #stream{credit = Credit1} = Str2} ->
+                              rabbit_channel:send_drained(self(), {CTag, Credit1}),
+                              Readers0#{CTag => Str2#stream{credit = 0}};
+                          _ ->
+                              Readers1
+                      end;
+                  false ->
+                      Readers1
+              end,
+    State#stream_client{readers = Readers}.
 
 deliver(QSs, #delivery{confirm = Confirm} = Delivery) ->
     lists:foldl(
